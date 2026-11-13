@@ -1,0 +1,55 @@
+# Файл нужно положить в репозиторий по пути: .github/workflows/dashboard.yml
+name: Update Kindle dashboard
+
+on:
+  workflow_dispatch:   # запускается только вручную или по API (из Google Apps Script)
+
+concurrency:
+  group: dashboard
+  cancel-in-progress: true
+
+permissions:
+  contents: write      # нужно, чтобы запушить PNG в ветку gh-pages
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install fonts (кириллица)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fonts-dejavu-core
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      # Забираем state.json (последний нормальный график) из прошлой публикации.
+      # При первом запуске ветки gh-pages ещё нет, это нормально.
+      - name: Restore previous state
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: gh-pages
+          path: prev
+
+      - name: Generate PNG
+        run: python dashboard.py --state-in prev/state.json
+
+      # Каждый раз создаём ОДИН новый коммит и force-push в gh-pages.
+      # История не копится, репозиторий не раздувается (иначе +3 МБ в сутки).
+      - name: Publish to gh-pages
+        run: |
+          cd dist
+          touch .nojekyll
+          git init -q -b gh-pages
+          git config user.name "dashboard-bot"
+          git config user.email "dashboard-bot@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Dashboard $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
