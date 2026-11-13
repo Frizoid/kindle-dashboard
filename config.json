@@ -6,7 +6,7 @@
   "yasno": { "region_id": 25, "dso_id": 902 },
   "groups": [
     { "label": "Дом", "group": "7.1" },
-    { "label": "Работа", "group": "5.1" }
+    { "label": "Офіс", "group": "5.1" }
   ],
   "output": "dist/dashboard.png"
 }
