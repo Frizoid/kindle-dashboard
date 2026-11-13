@@ -1,0 +1,12 @@
+{
+  "language": "ru",
+  "timezone": "Europe/Kyiv",
+  "screen": { "width": 758, "height": 1024, "rotate": 90 },
+  "weather": { "city": "Kyiv", "display_name": null, "latitude": null, "longitude": null, "model": "icon_seamless" },
+  "yasno": { "region_id": 25, "dso_id": 902 },
+  "groups": [
+    { "label": "Дом", "group": "7.1" },
+    { "label": "Работа", "group": "5.1" }
+  ],
+  "output": "dist/dashboard.png"
+}
