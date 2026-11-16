@@ -416,6 +416,8 @@ def date_str(now, T):
 # Иконки погоды
 # ----------------------------------------------------------------------------
 def wmo_category(code):
+    if code is None:      # модель может не покрывать последний день прогноза
+        return None
     code = int(code)
     if code in (0, 1):
         return "clear"
@@ -537,7 +539,7 @@ def draw_weather(d, box, wx, T, now):
     tw = d.textlength(temp, font=ft)
     d.text((x0 + pad, ty + (120 * u - tsize) * 0.5), temp, font=ft, fill=BLACK, anchor="la")
     draw_icon(d, cat, x0 + pad + tw + 16 * u + 0.46 * icon_s, ty + 66 * u, icon_s)
-    desc = T["weather"][cat]
+    desc = T["weather"].get(cat, "")
     d.text((x0 + pad, ty + 128 * u), desc, font=fit_font(d, desc, left_w, 30 * u, True, 20 * u),
            fill=BLACK, anchor="la")
     extra = (f"{T['feels']} {fmt_t(cur.get('apparent_temperature'))}  ·  "
