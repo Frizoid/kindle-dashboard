@@ -2,7 +2,7 @@
   "language": "uk",
   "timezone": "Europe/Kyiv",
   "screen": { "width": 758, "height": 1024, "rotate": 0 },
-  "weather": { "city": "Kyiv", "display_name": null, "latitude": null, "longitude": null, "model": "icon_seamless" },
+  "weather": { "city": "Kyiv", "display_name": null, "latitude": null, "longitude": null, "model": "icon_eu" },
   "yasno": { "region_id": 25, "dso_id": 902 },
   "groups": [
     { "label": "Дом", "group": "7.1" },
