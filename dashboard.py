@@ -62,6 +62,7 @@ I18N = {
         "feels": "Ощущается", "wind": "Ветер", "ms": "м/с",
         "updated": "Обновлено",
         "no_weather": "Нет данных о погоде",
+        "stale_wx": "данные от {t}",
         "no_outage_data": "Нет данных Yasno",
         "weekdays": ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"],
         "weekdays_full": ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"],
@@ -89,6 +90,7 @@ I18N = {
         "feels": "Відчувається", "wind": "Вітер", "ms": "м/с",
         "updated": "Оновлено",
         "no_weather": "Немає даних про погоду",
+        "stale_wx": "дані від {t}",
         "no_outage_data": "Немає даних Yasno",
         "weekdays": ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"],
         "weekdays_full": ["Понеділок", "Вівторок", "Середа", "Четвер", "П’ятниця", "Субота", "Неділя"],
@@ -116,6 +118,7 @@ I18N = {
         "feels": "Feels like", "wind": "Wind", "ms": "m/s",
         "updated": "Updated",
         "no_weather": "No weather data",
+        "stale_wx": "data from {t}",
         "no_outage_data": "No Yasno data",
         "weekdays": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
         "weekdays_full": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
@@ -146,18 +149,18 @@ def load_config(path):
 # ----------------------------------------------------------------------------
 # Получение данных
 # ----------------------------------------------------------------------------
-def http_get_json(url, params=None, retries=3):
+def http_get_json(url, params=None, retries=2, timeout=(8, 30)):
     last = None
     for i in range(retries):
         try:
-            r = requests.get(url, params=params, timeout=25,
+            r = requests.get(url, params=params, timeout=timeout,
                              headers={"User-Agent": UA, "Accept": "application/json"})
             r.raise_for_status()
             return r.json()
         except Exception as e:  # noqa: BLE001
             last = e
             if i < retries - 1:
-                time.sleep(2 * (i + 1))
+                time.sleep(5 * (i + 1))
     raise last
 
 
@@ -167,17 +170,30 @@ MODEL_LABELS = {
 }
 
 
-def fetch_weather(cfg):
+def short_err(e):
+    """Короткое описание ошибки для картинки и лога."""
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        return f"HTTP {resp.status_code} {str(resp.text)[:60]}".strip()
+    return f"{type(e).__name__}: {str(e)[:70]}"
+
+
+def fetch_weather(cfg, state):
     w = cfg["weather"]
     lang = cfg["language"]
     lat, lon, name = w.get("latitude"), w.get("longitude"), w.get("city")
     if lat is None or lon is None:
-        g = http_get_json("https://geocoding-api.open-meteo.com/v1/search",
-                          {"name": w["city"], "count": 1, "language": lang, "format": "json"})
-        res = g.get("results")
-        if not res:
-            raise RuntimeError(f"Город не найден: {w['city']}")
-        lat, lon, name = res[0]["latitude"], res[0]["longitude"], res[0]["name"]
+        geo = state.get("geo") or {}
+        if geo.get("city") == w["city"] and geo.get("lang") == lang:   # координаты берём из кэша
+            lat, lon, name = geo["lat"], geo["lon"], geo["name"]
+        else:
+            g = http_get_json("https://geocoding-api.open-meteo.com/v1/search",
+                              {"name": w["city"], "count": 1, "language": lang, "format": "json"})
+            res = g.get("results")
+            if not res:
+                raise RuntimeError(f"Город не найден: {w['city']}")
+            lat, lon, name = res[0]["latitude"], res[0]["longitude"], res[0]["name"]
+            state["geo"] = {"city": w["city"], "lang": lang, "lat": lat, "lon": lon, "name": name}
     params = {
         "latitude": lat, "longitude": lon,
         "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
@@ -186,19 +202,40 @@ def fetch_weather(cfg):
         "timezone": "auto",
         "forecast_days": 5,
     }
+    url = "https://api.open-meteo.com/v1/forecast"
     model = w.get("model")
     label = "Open-Meteo"
     if model:
         try:
-            data = http_get_json("https://api.open-meteo.com/v1/forecast", dict(params, models=model))
+            data = http_get_json(url, dict(params, models=model))
             label = MODEL_LABELS.get(model, model)
         except Exception as e:  # noqa: BLE001
-            print(f"[!] Модель {model} недоступна ({e!r}), беру модель по умолчанию", file=sys.stderr)
-            data = http_get_json("https://api.open-meteo.com/v1/forecast", params)
+            print(f"[!] Модель {model} недоступна ({short_err(e)}), беру модель по умолчанию", file=sys.stderr)
+            data = http_get_json(url, params, retries=1)
     else:
-        data = http_get_json("https://api.open-meteo.com/v1/forecast", params)
+        data = http_get_json(url, params)
     return {"name": w.get("display_name") or name, "label": label,
             "current": data["current"], "daily": data["daily"]}
+
+
+def weather_from_state(state, now):
+    """Open-Meteo недоступен: берём последнюю сохранённую погоду (не старше суток)."""
+    try:
+        saved = state["weather"]
+        ts = datetime.fromisoformat(saved["saved"])
+        wx = json.loads(json.dumps(saved["data"]))
+        if (now - ts).total_seconds() > 24 * 3600:
+            return None
+        daily = wx["daily"]
+        keep = [i for i, t in enumerate(daily["time"]) if t >= now.date().isoformat()]
+        if not keep:
+            return None
+        for k in list(daily):
+            daily[k] = [daily[k][i] for i in keep]
+        wx["stale_ts"] = ts.strftime("%H:%M") if ts.date() == now.date() else ts.strftime("%d.%m %H:%M")
+        return wx
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def fetch_outages(cfg):
@@ -507,7 +544,7 @@ def draw_drop(d, x, y, r):
 # ----------------------------------------------------------------------------
 # Блок погоды
 # ----------------------------------------------------------------------------
-def draw_weather(d, box, wx, T, now):
+def draw_weather(d, box, wx, T, now, err=None):
     x0, y0, x1, y1 = box
     bw, bh = x1 - x0, y1 - y0
     u = min(bw / 758, bh / 470)
@@ -515,6 +552,9 @@ def draw_weather(d, box, wx, T, now):
 
     if wx is None:
         d.text((x0 + pad, y0 + pad), T["no_weather"], font=font(30 * u, True), fill=BLACK, anchor="la")
+        if err:
+            f = font(18 * u)
+            d.text((x0 + pad, y0 + pad + 50 * u), ellipsize(d, err, f, bw - 2 * pad), font=f, fill=DARK, anchor="la")
         return
 
     icon_s = 150 * u
@@ -558,6 +598,11 @@ def draw_weather(d, box, wx, T, now):
     d.text((rcx, y0 + 196 * u), str(now.year), font=fit_font(d, str(now.year), rw, 30 * u, False, 18 * u),
            fill=DARK, anchor="mm")
 
+    if wx.get("stale_ts"):
+        st = T["stale_wx"].format(t=wx["stale_ts"])
+        d.text((rcx, y0 + 238 * u), st, font=fit_font(d, st, bw - lw - 16 * u, 18 * u, True, 12 * u),
+               fill=BLACK, anchor="mm")
+
     fy = y0 + 285 * u
     d.line([(x0 + pad, fy), (x1 - pad, fy)], fill=MID, width=max(1, int(2 * u)))
     daily = wx["daily"]
@@ -566,7 +611,7 @@ def draw_weather(d, box, wx, T, now):
     for i in range(n):
         cx = x0 + pad + cw * (i + 0.5)
         dt = datetime.fromisoformat(daily["time"][i])
-        label = T["today"] if i == 0 else T["weekdays"][dt.weekday()]
+        label = T["today"] if dt.date() == now.date() else T["weekdays"][dt.weekday()]
         d.text((cx, fy + 8 * u), label, font=font(22 * u, True), fill=BLACK, anchor="ma")
         draw_icon(d, wmo_category(daily["weather_code"][i]), cx, fy + 66 * u, 56 * u)
         d.text((cx, fy + 98 * u), fmt_t(daily["temperature_2m_max"][i]), font=font(24 * u, True),
@@ -694,7 +739,7 @@ def draw_outages(d, box, outs, cfg, T, now):
 # ----------------------------------------------------------------------------
 # Сборка картинки
 # ----------------------------------------------------------------------------
-def render(cfg, wx, outs, errors, now):
+def render(cfg, wx, outs, errors, now, details=None):
     T = I18N.get(cfg["language"], I18N["ru"])
     W, H = cfg["screen"]["width"], cfg["screen"]["height"]
     rot = int(cfg["screen"].get("rotate", 0)) % 360
@@ -707,12 +752,12 @@ def render(cfg, wx, outs, errors, now):
 
     if ch >= cw:  # портрет: погода сверху, отключения снизу
         split = (ch - foot) * 0.47
-        draw_weather(d, (0, 0, cw, split), wx, T, now)
+        draw_weather(d, (0, 0, cw, split), wx, T, now, (details or {}).get("погода"))
         d.line([(16 * s, split), (cw - 16 * s, split)], fill=BLACK, width=max(2, int(3 * s)))
         draw_outages(d, (0, split, cw, ch - foot), outs, cfg, T, now)
     else:         # ландшафт: две колонки
         half = cw / 2
-        draw_weather(d, (0, 0, half, ch - foot), wx, T, now)
+        draw_weather(d, (0, 0, half, ch - foot), wx, T, now, (details or {}).get("погода"))
         d.line([(half, 16 * s), (half, ch - foot - 8 * s)], fill=BLACK, width=max(2, int(3 * s)))
         draw_outages(d, (half, 0, cw, ch - foot), outs, cfg, T, now)
 
@@ -760,6 +805,7 @@ def main():
     cfg = load_config(args.config)
     now = datetime.now(ZoneInfo(cfg["timezone"]))
     errors = []
+    details = {}
 
     if args.demo:
         wx, outs = demo_data(now)
@@ -771,11 +817,18 @@ def main():
             out_path = ROOT / out_path
         state_file = out_path.parent / "state.json"
         state = load_state(Path(args.state_in) if args.state_in else state_file)
+        weather_ok = False
         try:
-            wx = fetch_weather(cfg)
+            wx = fetch_weather(cfg, state)
+            weather_ok = True
+            state["weather"] = {"saved": now.isoformat(), "data": wx}
         except Exception as e:  # noqa: BLE001
             errors.append("погода")
-            print(f"[!] Погода: {e!r}", file=sys.stderr)
+            details["погода"] = short_err(e)
+            print(f"[!] Погода: {short_err(e)}", file=sys.stderr)
+            wx = weather_from_state(state, now)
+            if wx:
+                print("[!] Показываю последнюю сохранённую погоду", file=sys.stderr)
         yasno_ok = False
         try:
             outs = build_outages(fetch_outages(cfg), cfg["groups"], state, now)
@@ -784,13 +837,13 @@ def main():
             errors.append("Yasno")
             print(f"[!] Yasno: {e!r}", file=sys.stderr)
             outs = outages_from_state(cfg["groups"], state, now)
-        if wx is None and not yasno_ok:
+        if not weather_ok and not yasno_ok:
             print("[!] Оба источника недоступны, картинка не обновлена", file=sys.stderr)
             return 1
         # state.json публикуется вместе с PNG, поэтому пишем его в любом случае
         save_state(state_file, state)
 
-    img = render(cfg, wx, outs, errors, now)
+    img = render(cfg, wx, outs, errors, now, details)
     out = Path(args.output or cfg["output"])
     if not out.is_absolute():
         out = ROOT / out
